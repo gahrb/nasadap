@@ -3,6 +3,7 @@
 Created on Wed Sep 12 10:27:09 2018
 
 @author: MichaelK
+@author: gahrb took over for the descartes_lib
 """
 import os
 import pickle
@@ -13,24 +14,20 @@ from time import sleep
 from lxml import etree
 import itertools
 from multiprocessing.pool import ThreadPool
-#from pydap.client import open_url
 from pydap.cas.urs import setup_session
 from nasadap.util import parse_nasa_catalog, mission_product_dict, master_datasets
-#from util import parse_nasa_catalog, mission_product_dict, master_datasets
-
-#######################################
-### Parameters
+from tqdm import tqdm
+from joblib import Parallel, delayed
 
 file_index_name = 'file_index.pickle'
 
-#######################################
-
 
 def download_files(url, path, session, master_dataset_list, dataset_types, min_lat, max_lat, min_lon, max_lon):
-#    print('Downloading and saving to...')
-    print(path)
-#    print(url)
+    # print('Downloading and saving to...')
+    # print(path)
+    # print(url)
     counter = 4
+    ds2 = None
     while counter > 0:
         try:
             store = xr.backends.PydapDataStore.open(url, session=session)
@@ -57,16 +54,15 @@ def download_files(url, path, session, master_dataset_list, dataset_types, min_l
         except Exception as err:
             print(err)
             print('Retrying in 3 seconds...')
+            # Check for URL update
             counter = counter - 1
             sleep(3)
 
     ## Save data as cache
-    if not os.path.isfile(path):
-#        print('Saving data to...')
-#        print(path)
-        ds2.to_netcdf(path)
-
-    return ds2[dataset_types]
+    if ds2 is not None and not os.path.isfile(path):
+        ds2.to_netcdf(path, mode='w')
+        return ds2[dataset_types]
+    return
 
 
 def parse_dap_xml(date, file_path, mission, product, version, process_level, base_url):
@@ -100,7 +96,6 @@ class Nasa(object):
     """
     missions_products = {m: list(mission_product_dict[m]['products'].keys()) for m in mission_product_dict}
 
-
     def __init__(self, username, password, mission, cache_dir=None):
         self.session(username, password, mission, cache_dir)
 
@@ -116,7 +111,7 @@ class Nasa(object):
             The password for the login.
         mission : str
             Mission name.
-        cach_dir : str or None
+        cache_dir : str or None
             A path to cache the netcdf files for future reading. If None, the currently working directory is used.
 
         Returns
@@ -173,7 +168,6 @@ class Nasa(object):
         list
         """
         return master_datasets[product]
-
 
     def get_data(self, product, version, dataset_types, from_date=None, to_date=None, min_lat=None, max_lat=None, min_lon=None, max_lon=None, dl_sim_count=30, check_local=True):
         """
@@ -255,7 +249,7 @@ class Nasa(object):
             split_text = 'hyrax/'
         else:
             split_text = 'opendap/'
-        url_dict = {u: os.path.join(self.cache_dir, os.path.splitext(u.split(split_text)[1])[0].replace('/', '\\') + '.nc4') for u in url_list}
+        url_dict = {u: os.path.join(self.cache_dir, os.path.splitext(u.split(split_text)[1])[0] + '.nc4') for u in url_list}
         path_set = set(url_dict.values())
 
         save_dirs = set([os.path.split(u)[0] for u in url_dict.values()])
@@ -266,6 +260,8 @@ class Nasa(object):
         ## Find out what files exist locally
         product_dir = file_path1.split('/')[0].format(mission=self.mission.upper(), product=product, version=version)
         product_path = os.path.join(self.cache_dir, self.mission_dict['process_level'], product_dir)
+        if not os.path.isdir(product_path):
+            os.makedirs(product_path)
         file_index_path = os.path.join(product_path, file_index_name)
 
         if os.path.isfile(file_index_path):
@@ -280,7 +276,7 @@ class Nasa(object):
             with open(file_index_path, 'wb') as handle:
                 pickle.dump(master_set, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-        ## Load in files locally and remotely
+        # Load in files locally and remotely
         if check_local:
             print('Checking if files exist locally...')
             local_set = path_set.intersection(master_set)
@@ -302,10 +298,10 @@ class Nasa(object):
         if remote_dict:
             print('Downloading files from NASA...')
 
-            iter1 = [(u, u0, self.session, master_dataset_list, dataset_types, min_lat, max_lat, min_lon, max_lon) for u, u0 in remote_dict.items()]
+            iter1 = [(u, u0, self.session, master_dataset_list, dataset_types, min_lat, max_lat, min_lon, max_lon)
+                     for u, u0 in remote_dict.items()]
 
-            output = ThreadPool(dl_sim_count).starmap(download_files, iter1)
-
+            output = Parallel()(delayed(download_files)(*i) for i in tqdm(iter1))
             ds_list.extend(output)
 
         ds_all = xr.concat(ds_list, dim='time').sortby('time')
